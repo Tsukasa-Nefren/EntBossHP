@@ -26,7 +26,7 @@ namespace EntBossHP
         private static partial Regex BossNameSuffixRegex();
 
         public override string ModuleName => "EntBossHP";
-        public override string ModuleVersion => "2.1.3";
+        public override string ModuleVersion => "2.1.4";
         public override string ModuleAuthor => "Oylsister, Credits to Kxrnl, DarkerZ [RUS] / modified by Tsukasa";
         
         public string PluginConfigDirectory => Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", ModuleName);
@@ -46,25 +46,38 @@ namespace EntBossHP
 
         private HitEventDisplay HitEventDisplay { get; set; } = null!;
 
-        // Store delegates to prevent GC collection which causes crashes
-        private BasePlugin.EntityOutputHookDelegate? _counterOutDelegate;
-        private BasePlugin.EntityOutputHookDelegate? _breakableOutDelegate;
-        private BasePlugin.EntityOutputHookDelegate? _hitboxHookDelegate;
+        // Store delegates dynamically to prevent GC collection without hardcoding the type name
+        private System.Collections.Generic.List<object> _pinnedHooks = new();
+
+        private void HookAndPin(string className, string outputName, string methodName)
+        {
+            System.Reflection.MethodInfo? hookMethod = null;
+            foreach (var m in typeof(BasePlugin).GetMethods(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public))
+            {
+                if (m.Name == "HookEntityOutput" && m.GetParameters().Length == 3)
+                {
+                    hookMethod = m;
+                    break;
+                }
+            }
+            if (hookMethod == null) return;
+            var delegateType = hookMethod.GetParameters()[2].ParameterType;
+            var targetMethod = this.GetType().GetMethod(methodName, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var del = Delegate.CreateDelegate(delegateType, this, targetMethod!);
+            _pinnedHooks.Add(del);
+            hookMethod.Invoke(this, new object[] { className, outputName, del });
+        }
 
         public override void Load(bool hotReload)
         {
             _playerPreferenceService = new PlayerPreferenceService(() => SettingsCapability.Get(), true);
             HitEventDisplay = new(this);
 
-            _counterOutDelegate = CounterOut;
-            _breakableOutDelegate = BreakableOut;
-            _hitboxHookDelegate = Hitbox_Hook;
-
-            HookEntityOutput("math_counter", "OutValue", _counterOutDelegate);
-            HookEntityOutput("func_physbox_multiplayer", "OnDamaged", _breakableOutDelegate);
-            HookEntityOutput("func_physbox", "OnHealthChanged", _breakableOutDelegate);
-            HookEntityOutput("func_breakable", "OnHealthChanged", _breakableOutDelegate);
-            HookEntityOutput("prop_dynamic", "OnHealthChanged", _hitboxHookDelegate);
+            HookAndPin("math_counter", "OutValue", nameof(CounterOut));
+            HookAndPin("func_physbox_multiplayer", "OnDamaged", nameof(BreakableOut));
+            HookAndPin("func_physbox", "OnHealthChanged", nameof(BreakableOut));
+            HookAndPin("func_breakable", "OnHealthChanged", nameof(BreakableOut));
+            HookAndPin("prop_dynamic", "OnHealthChanged", nameof(Hitbox_Hook));
 
             RegisterEventHandler<EventRoundStart>(OnRoundStart);
             RegisterListener<OnMapStart>(MapStart);

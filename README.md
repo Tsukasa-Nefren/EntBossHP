@@ -116,7 +116,7 @@ The plugin automatically detects new boss entities during gameplay:
 
 ## Technical Details
 
-- **Version**: 2.1.3
+- **Version**: 2.1.4
 - **Author**: Oylsister, Credits to Kxrnl, DarkerZ [RUS] / modified by Tsukasa
 - **Target Framework**: .NET 10
 - **Dependencies**: CounterStrikeSharp.API 1.0.369, [PlayerSettingsApi](https://github.com/NickFox007/PlayerSettingsCS2) (Optional)
