@@ -62,18 +62,6 @@ namespace EntBossHP
                 }
             }
 
-            if (_plugin.BossConfigs.HPBarList != null)
-            {
-                foreach (var hpBar in _plugin.BossConfigs.HPBarList)
-                {
-                    if (hpBar != null && (
-                        MatchesDisplayName(hpBar.MathCounter, sanitizedName) ||
-                        MatchesDisplayName(hpBar.Iterator, sanitizedName) ||
-                        MatchesDisplayName(hpBar.Backup, sanitizedName)))
-                        return hpBar.Name ?? sanitizedName;
-                }
-            }
-
             return sanitizedName;
         }
 

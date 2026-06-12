@@ -10,6 +10,8 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
 
     <GenerateDependencyFile>true</GenerateDependencyFile>
+    <ReferenceLibraryRoot Condition="'$(ReferenceLibraryRoot)' == '' And Exists('D:/AMPDatastore/Instances/cssharp01/counter-strike2/730/game/csgo/addons/counterstrikesharp/shared')">D:/AMPDatastore/Instances/cssharp01/counter-strike2/730/game/csgo/addons/counterstrikesharp/shared</ReferenceLibraryRoot>
+    <ReferenceLibraryRoot Condition="'$(ReferenceLibraryRoot)' == ''">$(MSBuildProjectDirectory)/lib</ReferenceLibraryRoot>
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
@@ -23,8 +25,10 @@
       <ExcludeAssets>runtime</ExcludeAssets>
     </PackageReference>
 
-    
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <ProjectReference Include="vendor/PlayerSettingsCS2/PlayerSettingsApi/PlayerSettingsApi.csproj">
+      <Private>false</Private>
+      <PrivateAssets>all</PrivateAssets>
+    </ProjectReference>
   </ItemGroup>
 
   
@@ -42,5 +46,11 @@
     <None Remove="**\*.md" />
     <None Remove="**\*.yml" />
     <None Remove="**\*.yaml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="vendor/**" />
+    <EmbeddedResource Remove="vendor/**" />
+    <None Remove="vendor/**" />
   </ItemGroup>
 </Project>

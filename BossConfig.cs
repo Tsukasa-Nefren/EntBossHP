@@ -1,88 +1,89 @@
-﻿using Newtonsoft.Json;
+using System.Text.Json.Serialization;
 
 namespace EntBossHP
 {
     public class BossConfig
     {
-        [JsonProperty(PropertyName = "Breakable")]
+        [JsonPropertyName("Breakable")]
         public List<BreakableConfig> BreakableList { get; set; } = [];
 
-        [JsonProperty(PropertyName = "MathCounter")]
+        [JsonPropertyName("MathCounter")]
         public List<MathCounterConfig> MathCounterList { get; set; } = [];
 
-        [JsonProperty(PropertyName = "HPBar")]
+        [JsonPropertyName("HPBar")]
+        [Obsolete("HPBar is deprecated. Use MathCounter with health_segment_counter instead.")]
         public List<HPBarConfig> HPBarList { get; set; } = [];
     }
 
     public class BreakableConfig
     {
-        [JsonProperty(PropertyName = "name")]
+        [JsonPropertyName("name")]
         public string Name { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "enabled")]
+        [JsonPropertyName("enabled")]
         public bool Enabled { get; set; } = true;
 
-        [JsonProperty(PropertyName = "breakable")]
+        [JsonPropertyName("breakable")]
         public string Breakable { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "health_segment_counter")]
-        public string HealthSegmentCounter { get; set; } = string.Empty;
+        [JsonPropertyName("health_segment_counter")]
+        public string? HealthSegmentCounter { get; set; }
 
-        [JsonProperty(PropertyName = "health_segment_counter_mode")]
+        [JsonPropertyName("health_segment_counter_mode")]
         public int HealthSegmentCounterMode { get; set; } = 1;
 
-        [JsonProperty(PropertyName = "hp_offset")]
+        [JsonPropertyName("hp_offset")]
         public int HpOffset { get; set; } = 0;
     }
 
     public class MathCounterConfig
     {
-        [JsonProperty(PropertyName = "name")]
+        [JsonPropertyName("name")]
         public string Name { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "enabled")]
+        [JsonPropertyName("enabled")]
         public bool Enabled { get; set; } = true;
 
-        [JsonProperty(PropertyName = "mathcounter")]
+        [JsonPropertyName("mathcounter")]
         public string MathCounter { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "mathcounter_mode")]
+        [JsonPropertyName("mathcounter_mode")]
         public int MathCounterMode { get; set; } = 1;
 
-        [JsonProperty(PropertyName = "health_segment_counter")]
-        public string HealthSegmentCounter { get; set; } = string.Empty;
+        [JsonPropertyName("health_segment_counter")]
+        public string? HealthSegmentCounter { get; set; }
 
-        [JsonProperty(PropertyName = "health_segment_counter_mode")]
+        [JsonPropertyName("health_segment_counter_mode")]
         public int HealthSegmentCounterMode { get; set; } = 1;
 
-        [JsonProperty(PropertyName = "hp_offset")]
+        [JsonPropertyName("hp_offset")]
         public int HpOffset { get; set; } = 0;
     }
 
     public class HPBarConfig
     {
-        [JsonProperty(PropertyName = "name")]
+        [JsonPropertyName("name")]
         public string Name { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "enabled")]
+        [JsonPropertyName("enabled")]
         public bool Enabled { get; set; } = true;
 
-        [JsonProperty(PropertyName = "mathcounter")]
+        [JsonPropertyName("mathcounter")]
         public string MathCounter { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "mathcounter_mode")]
+        [JsonPropertyName("mathcounter_mode")]
         public int MathCounterMode { get; set; } = 1;
 
-        [JsonProperty(PropertyName = "iterator")]
+        [JsonPropertyName("iterator")]
         public string Iterator { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "iterator_mode")]
+        [JsonPropertyName("iterator_mode")]
         public int IteratorMode { get; set; } = 1;
 
-        [JsonProperty(PropertyName = "backup")]
+        [JsonPropertyName("backup")]
         public string Backup { get; set; } = string.Empty;
 
-        [JsonProperty(PropertyName = "hp_offset")]
+        [JsonPropertyName("hp_offset")]
         public int HpOffset { get; set; } = 0;
     }
 }

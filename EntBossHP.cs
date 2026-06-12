@@ -2,13 +2,16 @@ using CounterStrikeSharp.API;
 using CounterStrikeSharp.API.Core;
 using CounterStrikeSharp.API.Core.Attributes;
 using CounterStrikeSharp.API.Modules.Commands;
-using CounterStrikeSharp.API.Modules.Cvars;
 using CounterStrikeSharp.API.Modules.Memory;
 using CounterStrikeSharp.API.Modules.Utils;
 using CounterStrikeSharp.API.Modules.Timers;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
+using System.Globalization;
+using PlayerSettings;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using CounterStrikeSharp.API.Core.Capabilities;
 using static CounterStrikeSharp.API.Core.Listeners;
 
 namespace EntBossHP
@@ -16,31 +19,36 @@ namespace EntBossHP
     [MinimumApiVersion(369)]
     public partial class EntBossHP : BasePlugin
     {
+        private const ulong SteamId64Base = 76561197960265728UL;
+        private const uint InvalidAccountId = uint.MaxValue;
+
         [GeneratedRegex(@"_\d{3,}$")]
         private static partial Regex BossNameSuffixRegex();
 
         public override string ModuleName => "EntBossHP";
-        public override string ModuleVersion => "2.1.0";
+        public override string ModuleVersion => "2.1.1";
         public override string ModuleAuthor => "Oylsister, Credits to Kxrnl, DarkerZ [RUS] / modified by Tsukasa";
         
         public string PluginConfigDirectory => Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", ModuleName);
+        private string PlayerSettingsPath => Path.Combine(PluginConfigDirectory, "player_settings.json");
 
         private readonly List<BreakableBoss> _breakableBosses = [];
         private readonly List<MathCounterBoss> _mathCounterBosses = [];
-        private readonly List<HPBarBoss> _hpBarBosses = [];
 
-        private readonly Dictionary<string, BossData> _activeBosses = [];
+        private static readonly System.Threading.SemaphoreSlim SaveLock = new(1, 1);
+        private CCSGameRulesProxy? _gameRulesProxy;
         private bool configLoaded = false;
+
+        private static readonly PluginCapability<ISettingsApi?> SettingsCapability = new("settings:nfcore");
+        private PlayerPreferenceService _playerPreferenceService = null!;
 
         internal BossConfig BossConfigs { get; private set; } = new();
 
         private HitEventDisplay HitEventDisplay { get; set; } = null!;
-        
-        public FakeConVar<bool> CvarEnableBhud { get; } = new("css_bosshp_enablebhud", "Enable boss HP center HUD output", true, ConVarFlags.FCVAR_NONE);
-        
 
         public override void Load(bool hotReload)
         {
+            _playerPreferenceService = new PlayerPreferenceService(() => SettingsCapability.Get(), true);
             HitEventDisplay = new(this);
 
             HookEntityOutput("math_counter", "OutValue", CounterOut);
@@ -52,15 +60,39 @@ namespace EntBossHP
             RegisterEventHandler<EventRoundStart>(OnRoundStart);
             RegisterListener<OnMapStart>(MapStart);
             RegisterListener<OnEntityCreated>(OnEntityCreated);
+            RegisterListener<OnTick>(OnTick);
+            RegisterEventHandler<EventPlayerDisconnect>(OnPlayerDisconnect);
 
             AddCommand("boss_list", "", CommandBossList);
-
-            AddTimer(5.0f, CheckInactiveBosses, TimerFlags.REPEAT);
+            AddCommand("css_bhud", "Toggle boss HP HUD", CommandBossHud);
 
             if (hotReload)
             {
                 MapStart(Server.MapName);
             }
+        }
+
+        public override void OnAllPluginsLoaded(bool hotReload)
+        {
+            if (!configLoaded && !string.IsNullOrWhiteSpace(Server.MapName))
+            {
+                MapStart(Server.MapName);
+            }
+        }
+
+        public override void Unload(bool hotReload)
+        {
+            RemoveListener<OnTick>(OnTick);
+            _gameRulesProxy = null;
+        }
+        
+        private HookResult OnPlayerDisconnect(EventPlayerDisconnect @event, GameEventInfo info)
+        {
+            if (@event.Userid is { IsValid: true } player && player.AuthorizedSteamID?.SteamId64 is > 76561197960265728UL)
+            {
+                _playerPreferenceService.Remove(player.AuthorizedSteamID.SteamId64);
+            }
+            return HookResult.Continue;
         }
         
         private string SanitizeBossName(string entityName)
@@ -71,8 +103,29 @@ namespace EntBossHP
 
         private void MapStart(string mapname)
         {
+            _gameRulesProxy = null;
             LoadConfigBasedMap(mapname);
-            ExecuteConfigFile();
+        }
+
+        private void OnTick()
+        {
+            try
+            {
+                if (_gameRulesProxy is not { IsValid: true })
+                {
+                    _gameRulesProxy = Utilities.FindAllEntitiesByDesignerName<CCSGameRulesProxy>("cs_gamerules").FirstOrDefault();
+                }
+
+                var gameRules = _gameRulesProxy?.GameRules;
+                if (gameRules != null)
+                {
+                    gameRules.GameRestart = gameRules.RestartRoundTime < Server.CurrentTime;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Failed to update game restart state");
+            }
         }
 
         private void LoadConfigBasedMap(string mapname)
@@ -93,7 +146,11 @@ namespace EntBossHP
             {
                 try
                 {
-                    BossConfigs = JsonConvert.DeserializeObject<BossConfig>(File.ReadAllText(configPath)) ?? new();
+                    BossConfigs = JsonSerializer.Deserialize<BossConfig>(File.ReadAllText(configPath), new JsonSerializerOptions
+                    {
+                        ReadCommentHandling = JsonCommentHandling.Skip,
+                        AllowTrailingCommas = true
+                    }) ?? new();
                 }
                 catch (Exception ex)
                 {
@@ -105,24 +162,12 @@ namespace EntBossHP
             configLoaded = true;
 
             BossDataLoading();
-            _activeBosses.Clear();
-        }
-
-        private void ExecuteConfigFile()
-        {
-            var configFolder = Path.Combine(Server.GameDirectory, "csgo/cfg/entbosshp/");
-            if (!Directory.Exists(configFolder)) return;
-            var configPath = Path.Combine(configFolder, "entbosshp.cfg");
-            if (!File.Exists(configPath)) return;
-
-            Server.ExecuteCommand("exec entbosshp/entbosshp.cfg");
         }
 
         private void BossDataLoading()
         {
             _breakableBosses.Clear();
             _mathCounterBosses.Clear();
-            _hpBarBosses.Clear();
 
             foreach (var breakable in BossConfigs.BreakableList)
             {
@@ -130,7 +175,6 @@ namespace EntBossHP
                 {
                     BossName = breakable.Name,
                     Enabled = breakable.Enabled,
-                    Type = BossType.Breakable,
                     BreakableEntityName = breakable.Breakable,
                     HpOffset = breakable.HpOffset,
                 };
@@ -149,7 +193,6 @@ namespace EntBossHP
                 {
                     BossName = mathcounter.Name,
                     Enabled = mathcounter.Enabled,
-                    Type = BossType.MathCounter,
                     MathCounterHitMode = mathcounter.MathCounterMode,
                     MathCounterName = mathcounter.MathCounter,
                     HpOffset = mathcounter.HpOffset,
@@ -162,23 +205,6 @@ namespace EntBossHP
                 }
                 _mathCounterBosses.Add(boss);
             }
-
-            foreach (var hpbar in BossConfigs.HPBarList)
-            {
-                var boss = new HPBarBoss
-                {
-                    BossName = hpbar.Name,
-                    Enabled = hpbar.Enabled,
-                    Type = BossType.HPBar,
-                    MathCounterHitMode = hpbar.MathCounterMode,
-                    MathCounterName = hpbar.MathCounter,
-                    IteratorHitMode = hpbar.IteratorMode,
-                    IteratorName = hpbar.Iterator,
-                    BackupName = hpbar.Backup,
-                    HpOffset = hpbar.HpOffset,
-                };
-                _hpBarBosses.Add(boss);
-            }
         }
 
         private HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
@@ -186,7 +212,6 @@ namespace EntBossHP
             if (configLoaded)
             {
                 Server.PrintToChatAll($" {ChatColors.Olive}[{ChatColors.Lime}EntBossHP{ChatColors.Olive}] {ChatColors.White}The current map is supported by this plugin.");
-                _activeBosses.Clear();
                 ResetBossHP();
             }
             return HookResult.Continue;
@@ -199,25 +224,14 @@ namespace EntBossHP
                 boss.Health = 0;
                 boss.MaxHealth = 0;
                 boss.BreakableEntity = null;
-                boss.LastHit = 0f;
+                boss.DefeatPending = false;
             }
             foreach (var boss in _mathCounterBosses)
             {
                 boss.Health = 0;
                 boss.MaxHealth = 0;
                 boss.MathCounterEntity = null;
-                boss.LastHit = 0f;
-            }
-            foreach (var boss in _hpBarBosses)
-            {
-                boss.Health = 0;
-                boss.MaxHealth = 0;
-                boss.MathCounterEntity = null;
-                boss.BackUpEntity = null;
-                boss.BackupValue = 0f;
-                boss.IteratorValue = 0f;
-                boss.IteratorEntity = null;
-                boss.LastHit = 0f;
+                boss.DefeatPending = false;
             }
         }
 
@@ -226,7 +240,7 @@ namespace EntBossHP
             if (!configLoaded || entity == null || !entity.IsValid || entity.DesignerName != "math_counter") return;
             AddTimer(0.1f, () => {
                 if (entity.IsValid) Timer_MathCounterInitial(entity);
-            });
+            }, TimerFlags.STOP_ON_MAPCHANGE);
         }
 
         private void CommandBossList(CCSPlayerController? client, CommandInfo info)
@@ -235,15 +249,34 @@ namespace EntBossHP
             foreach (var boss in BossConfigs.MathCounterList) client.PrintToConsole($"Name: {boss.Name} | Counter: {boss.MathCounter} | Mode: {boss.MathCounterMode}");
             foreach (var boss in _mathCounterBosses) client.PrintToConsole($"Name: {boss.BossName} | Counter: {boss.MathCounterName} | Mode: {boss.MathCounterHitMode}");
         }
+
+        [CommandHelper(whoCanExecute: CommandUsage.CLIENT_ONLY)]
+        private void CommandBossHud(CCSPlayerController? client, CommandInfo info)
+        {
+            if (client == null || !client.IsValid) return;
+
+            var enabled = _playerPreferenceService.ToggleHud(client);
+
+            var state = enabled
+                ? $"{ChatColors.Lime}enabled"
+                : $"{ChatColors.Red}disabled";
+            info.ReplyToCommand($" {ChatColors.Olive}[{ChatColors.Lime}EntBossHP{ChatColors.Olive}] {ChatColors.White}Boss HP HUD is now {state}{ChatColors.White}.");
+        }
         
         private void Timer_MathCounterInitial(CEntityInstance entity)
         {
-            var entityName = GetEntityName(entity);
-            if (string.IsNullOrWhiteSpace(entityName)) return;
-            foreach (var boss in _mathCounterBosses.Where(b => b.IsSegmented && MatchesEntityName(entityName, b.HealthSegmentCounterName))) InitializeSegmentCounter(boss, entity);
-            foreach (var boss in _breakableBosses.Where(b => b.IsSegmented && MatchesEntityName(entityName, b.HealthSegmentCounterName))) InitializeSegmentCounter(boss, entity);
-            foreach (var boss in _mathCounterBosses.Where(b => MatchesEntityName(entityName, b.MathCounterName))) InitializeMainCounter(boss, entity);
-            foreach (var boss in _hpBarBosses) InitializeHpBarCounters(boss, entity);
+            try
+            {
+                var entityName = GetEntityName(entity);
+                if (string.IsNullOrWhiteSpace(entityName)) return;
+                foreach (var boss in _mathCounterBosses.Where(b => b.IsSegmented && MatchesEntityName(entityName, b.HealthSegmentCounterName))) InitializeSegmentCounter(boss, entity);
+                foreach (var boss in _breakableBosses.Where(b => b.IsSegmented && MatchesEntityName(entityName, b.HealthSegmentCounterName))) InitializeSegmentCounter(boss, entity);
+                foreach (var boss in _mathCounterBosses.Where(b => MatchesEntityName(entityName, b.MathCounterName))) InitializeMainCounter(boss, entity);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Error in Timer_MathCounterInitial");
+            }
         }
 
         private void InitializeSegmentCounter(SegmentedBossData boss, CEntityInstance entity)
@@ -263,147 +296,194 @@ namespace EntBossHP
         {
             boss.MathCounterEntity = entity;
             var counter = new CMathCounter(entity.Handle);
-            boss.MathCounterStartValue = (int)Math.Round(GetMathCounterValue(entity.Handle));
             boss.MathCounterMaxValue = (int)Math.Round(counter.Max);
-            boss.MathCounterMinValue = (int)Math.Round(counter.Min);
-            if (boss.MathCounterHitMode == 0) boss.MathCounterHitMode = counter.HitMin ? 2 : 1;
-        }
-        
-        private void InitializeHpBarCounters(HPBarBoss boss, CEntityInstance entity)
-        {
-            var entityName = GetEntityName(entity);
-            if (string.IsNullOrWhiteSpace(entityName)) return;
-            var counter = new CMathCounter(entity.Handle);
-            if (MatchesEntityName(entityName, boss.MathCounterName)) InitializeMainCounter(boss, entity);
-            if (MatchesEntityName(entityName, boss.IteratorName))
-            {
-                boss.IteratorEntity = entity;
-                if (boss.IteratorHitMode == 0) boss.IteratorHitMode = counter.HitMin ? 2 : 1;
-                boss.IteratorValue = (boss.IteratorHitMode == 2) ? counter.Max : GetMathCounterValue(entity.Handle);
-            }
-            if (MatchesEntityName(entityName, boss.BackupName))
-            {
-                boss.BackUpEntity = entity;
-                boss.BackupValue = GetMathCounterValue(entity.Handle);
-            }
+            if (boss.MathCounterHitMode == 0) boss.MathCounterHitMode = 1;
         }
         
         private HookResult CounterOut(CEntityIOOutput output, string name, CEntityInstance activator, CEntityInstance caller, CVariant value, float delay)
         {
-            if (caller == null || activator == null || activator.DesignerName != "player") return HookResult.Continue;
-            var client = GetPlayerFromEntity(activator);
-            if (client == null) return HookResult.Continue;
-
-            var entityname = GetEntityName(caller);
-            if (string.IsNullOrWhiteSpace(entityname)) return HookResult.Continue;
-            var counterValue = value.Get<float>();
-
-            if (configLoaded)
+            try
             {
-                if (!BossConfigs.MathCounterList.Any(b => MatchesEntityName(entityname, b.MathCounter)) && !BossConfigs.HPBarList.Any(b => MatchesEntityName(entityname, b.MathCounter)))
+                if (caller == null || activator == null || activator.DesignerName != "player") return HookResult.Continue;
+                var client = GetPlayerFromEntity(activator);
+                if (client == null) return HookResult.Continue;
+
+                var entityname = GetEntityName(caller);
+                if (string.IsNullOrWhiteSpace(entityname)) return HookResult.Continue;
+                var counterValue = value.Get<float>();
+                var counterValueInt = (int)counterValue;
+                UpdateSegmentCounters(entityname, counterValueInt, client);
+
+                if (configLoaded)
                 {
-                    var sanitizedName = SanitizeBossName(entityname);
-                    if (!BossConfigs.MathCounterList.Any(b => b.MathCounter == sanitizedName))
+                    if (!BossConfigs.MathCounterList.Any(b => MatchesEntityName(entityname, b.MathCounter)))
                     {
-                        var newBossConfig = new MathCounterConfig { Name = sanitizedName, MathCounter = sanitizedName, MathCounterMode = 1, Enabled = (counterValue > 10), HpOffset = 0 };
-                        BossConfigs.MathCounterList.Add(newBossConfig);
-                        SaveChanges();
-                        var newLiveBoss = new MathCounterBoss { BossName = newBossConfig.Name, Enabled = newBossConfig.Enabled, Type = BossType.MathCounter, MathCounterHitMode = newBossConfig.MathCounterMode, MathCounterName = newBossConfig.MathCounter, HpOffset = newBossConfig.HpOffset };
-                        InitializeMainCounter(newLiveBoss, caller);
-                        _mathCounterBosses.Add(newLiveBoss);
+                        var sanitizedName = SanitizeBossName(entityname);
+                        if (!BossConfigs.MathCounterList.Any(b => b.MathCounter == sanitizedName))
+                        {
+                            var newBossConfig = new MathCounterConfig { Name = sanitizedName, MathCounter = sanitizedName, MathCounterMode = 1, Enabled = (counterValue > 10), HpOffset = 0 };
+                            BossConfigs.MathCounterList.Add(newBossConfig);
+                            SaveChanges();
+                            var newLiveBoss = new MathCounterBoss { BossName = newBossConfig.Name, Enabled = newBossConfig.Enabled, MathCounterHitMode = newBossConfig.MathCounterMode, MathCounterName = newBossConfig.MathCounter, HpOffset = newBossConfig.HpOffset };
+                            InitializeMainCounter(newLiveBoss, caller);
+                            _mathCounterBosses.Add(newLiveBoss);
+                            if (newLiveBoss.Enabled)
+                            {
+                                ProcessMathCounterBoss(newLiveBoss, counterValue, client);
+                            }
+                        }
                     }
                 }
-            }
 
-            foreach (var boss in _mathCounterBosses.Where(b => MatchesEntityName(entityname, b.MathCounterName)))
+                foreach (var boss in _mathCounterBosses.Where(b => MatchesEntityName(entityname, b.MathCounterName)))
+                {
+                    ProcessMathCounterBoss(boss, counterValue, client);
+                }
+            }
+            catch (Exception ex)
             {
-                int currentHp = (boss.MathCounterHitMode == 1) ? (int)counterValue : boss.MathCounterMaxValue - (int)counterValue;
-                if (boss.IsSegmented && currentHp <= 0 && boss.HealthSegmentCounterEntity is { IsValid: true })
-                {
-                    AddTimer(0.1f, () => {
-                        if (boss.HealthSegmentCounterEntity is not { IsValid: true }) return;
-                        HandleSegmentEnd(boss, client, () => {
-                            boss.MaxHealth = 0;
-                            boss.Health = 0;
-                        });
-                    });
-                    continue; 
-                }
-                if (currentHp <= 0)
-                {
-                    _activeBosses.Remove(boss.BossName);
-                    continue;
-                }
-                boss.Health = currentHp;
-                if (boss.MaxHealth < boss.Health) boss.MaxHealth = boss.Health;
-                
-                if (boss.Enabled)
-                {
-                    UpdateAndDisplayBoss(boss, client);
-                }
+                Logger.LogError(ex, "Error in CounterOut");
             }
             return HookResult.Continue;
         }
 
         private HookResult BreakableOut(CEntityIOOutput output, string name, CEntityInstance activator, CEntityInstance caller, CVariant value, float delay)
         {
-            if (caller == null || activator == null || activator.DesignerName != "player") return HookResult.Continue;
-            var client = GetPlayerFromEntity(activator);
-            if (client == null) return HookResult.Continue;
-
-            var prop = new CBreakable(caller.Handle);
-            if (!prop.IsValid) return HookResult.Continue;
-            
-            var hp = prop.Health;
-            var entityname = GetEntityName(caller);
-            if (string.IsNullOrWhiteSpace(entityname)) return HookResult.Continue;
-
-            if (configLoaded)
+            try
             {
-                 if (!BossConfigs.BreakableList.Any(b => MatchesEntityName(entityname, b.Breakable)))
-                 {
-                    var sanitizedName = SanitizeBossName(entityname);
-                    if (!BossConfigs.BreakableList.Any(b => b.Breakable == sanitizedName))
+                if (caller == null || activator == null || activator.DesignerName != "player") return HookResult.Continue;
+                var client = GetPlayerFromEntity(activator);
+                if (client == null) return HookResult.Continue;
+
+                var prop = new CBreakable(caller.Handle);
+                if (!prop.IsValid) return HookResult.Continue;
+
+                var hp = prop.Health;
+                var entityname = GetEntityName(caller);
+                if (string.IsNullOrWhiteSpace(entityname)) return HookResult.Continue;
+                var engineMaxHealth = 0;
+                try
+                {
+                    engineMaxHealth = prop.MaxHealth;
+                }
+                catch
+                {
+                }
+
+                if (configLoaded)
+                {
+                     if (!BossConfigs.BreakableList.Any(b => MatchesEntityName(entityname, b.Breakable)))
+                     {
+                        var sanitizedName = SanitizeBossName(entityname);
+                        if (!BossConfigs.BreakableList.Any(b => b.Breakable == sanitizedName))
+                        {
+                            var newBossConfig = new BreakableConfig { Name = sanitizedName, Breakable = sanitizedName, Enabled = false, HpOffset = 0 };
+                            BossConfigs.BreakableList.Add(newBossConfig);
+                            SaveChanges();
+                            var newLiveBoss = new BreakableBoss { BossName = newBossConfig.Name, Enabled = newBossConfig.Enabled, BreakableEntityName = newBossConfig.Breakable, BreakableEntity = caller, HpOffset = newBossConfig.HpOffset };
+                            newLiveBoss.Health = hp;
+                            newLiveBoss.MaxHealth = engineMaxHealth > 0 ? engineMaxHealth : hp;
+                            _breakableBosses.Add(newLiveBoss);
+                            if (newLiveBoss.Enabled)
+                            {
+                                UpdateAndDisplayBoss(newLiveBoss, client);
+                            }
+                        }
+                     }
+                }
+
+                foreach (var boss in _breakableBosses.Where(b => MatchesEntityName(entityname, b.BreakableEntityName)))
+                {
+                    boss.BreakableEntity = caller;
+                    if (boss.IsSegmented && hp <= 0 && boss.HealthSegmentCounterEntity is { IsValid: true })
                     {
-                        var newBossConfig = new BreakableConfig { Name = sanitizedName, Breakable = sanitizedName, Enabled = (hp > 10), HpOffset = 0 };
-                        BossConfigs.BreakableList.Add(newBossConfig);
-                        SaveChanges();
-                        var newLiveBoss = new BreakableBoss { BossName = newBossConfig.Name, Enabled = newBossConfig.Enabled, Type = BossType.Breakable, BreakableEntityName = newBossConfig.Breakable, BreakableEntity = caller, HpOffset = newBossConfig.HpOffset };
-                        _breakableBosses.Add(newLiveBoss);
+                        AddTimer(0.1f, () => {
+                            if (boss.HealthSegmentCounterEntity is not { IsValid: true }) return;
+                            HandleSegmentEnd(boss, () => {
+                                boss.MaxHealth = 0;
+                                boss.Health = 0;
+                            });
+                        }, TimerFlags.STOP_ON_MAPCHANGE);
+                        continue;
                     }
-                 }
+                    if (hp <= 0)
+                    {
+                        ScheduleDefeatConfirmationBreakable(boss);
+                        continue;
+                    }
+                    boss.DefeatPending = false;
+                    boss.Health = hp;
+                    if (engineMaxHealth > 0) boss.MaxHealth = engineMaxHealth;
+                    else if (boss.MaxHealth <= 0) boss.MaxHealth = hp;
+                    if (hp > boss.MaxHealth) boss.MaxHealth = hp;
+
+                    if (boss.Enabled)
+                    {
+                        UpdateAndDisplayBoss(boss, client);
+                    }
+                }
             }
-            
-            foreach (var boss in _breakableBosses.Where(b => MatchesEntityName(entityname, b.BreakableEntityName)))
+            catch (Exception ex)
             {
-                if (boss.IsSegmented && hp <= 0 && boss.HealthSegmentCounterEntity is { IsValid: true })
-                {
-                    AddTimer(0.1f, () => {
-                        if (boss.HealthSegmentCounterEntity is not { IsValid: true }) return;
-                        HandleSegmentEnd(boss, client, () => {
-                            boss.MaxHealth = 0;
-                            boss.Health = 0;
-                        });
-                    });
-                    continue;
-                }
-                if (hp <= 0)
-                {
-                    _activeBosses.Remove(boss.BossName);
-                    continue;
-                }
-                boss.Health = hp;
-                if (boss.MaxHealth <= 0) boss.MaxHealth = hp;
-                
-                if (boss.Enabled)
-                {
-                    UpdateAndDisplayBoss(boss, client);
-                }
+                Logger.LogError(ex, "Error in BreakableOut");
             }
             return HookResult.Continue;
         }
 
-        private void HandleSegmentEnd(SegmentedBossData boss, CCSPlayerController client, Action resetAction)
+        private void ProcessMathCounterBoss(MathCounterBoss boss, float counterValue, CCSPlayerController client)
+        {
+            var currentHp = boss.MathCounterHitMode == 1 ? (int)counterValue : boss.MathCounterMaxValue - (int)counterValue;
+            if (boss.IsSegmented && currentHp <= 0 && boss.HealthSegmentCounterEntity is { IsValid: true })
+            {
+                AddTimer(0.1f, () => {
+                    if (boss.HealthSegmentCounterEntity is not { IsValid: true }) return;
+                    HandleSegmentEnd(boss, () => {
+                        boss.MaxHealth = 0;
+                        boss.Health = 0;
+                    });
+                }, TimerFlags.STOP_ON_MAPCHANGE);
+                return;
+            }
+
+            if (currentHp <= 0)
+            {
+                ScheduleDefeatConfirmation(boss);
+                return;
+            }
+
+            boss.DefeatPending = false;
+            boss.Health = currentHp;
+            UpdateMaxHealth(boss, currentHp);
+
+            if (boss.Enabled)
+            {
+                UpdateAndDisplayBoss(boss, client);
+            }
+        }
+
+        private void UpdateSegmentCounters(string entityName, int counterValue, CCSPlayerController client)
+        {
+            foreach (var boss in _mathCounterBosses) UpdateSegmentCounter(boss, entityName, counterValue, client);
+            foreach (var boss in _breakableBosses) UpdateSegmentCounter(boss, entityName, counterValue, client);
+        }
+
+        private void UpdateSegmentCounter(SegmentedBossData boss, string entityName, int counterValue, CCSPlayerController client)
+        {
+            if (!boss.IsSegmented) return;
+            if (boss.HealthSegmentCounterEntity is not { IsValid: true }) return;
+            if (!MatchesEntityName(entityName, boss.HealthSegmentCounterName)) return;
+
+            boss.HealthSegments = boss.HealthSegmentCounterMode == 2
+                ? Math.Max(0, boss.TotalHealthSegments - counterValue)
+                : counterValue;
+
+            if (boss.Enabled)
+            {
+                UpdateAndDisplayBoss(boss, client);
+            }
+        }
+
+        private void HandleSegmentEnd(SegmentedBossData boss, Action resetAction)
         {
             if (boss.HealthSegmentCounterEntity is not { IsValid: true } segmentCounterEntity) return;
 
@@ -415,14 +495,85 @@ namespace EntBossHP
             else boss.HealthSegments = (int)GetMathCounterValue(segmentCounterEntity.Handle);
             if (boss.HealthSegments <= 0)
             {
-                _activeBosses.Remove(boss.BossName);
-                if (IsBhudEnabled())
-                    HitEventDisplay.ShowBossDefeated(client, boss);
+                NotifyBossDefeated(boss);
                 return;
             }
             resetAction.Invoke();
-            boss.LastHP = boss.Health;
             
+        }
+
+        private void ScheduleDefeatConfirmation(BossData boss)
+        {
+            if (boss.DefeatPending) return;
+            boss.DefeatPending = true;
+
+            AddTimer(0.3f, () => {
+                if (!boss.DefeatPending) return;
+                boss.DefeatPending = false;
+
+                if (boss is MathCounterBoss mathCounterBoss && mathCounterBoss.MathCounterEntity is { IsValid: true } entity)
+                {
+                    var counterValue = GetMathCounterValue(entity.Handle);
+                    var currentHp = mathCounterBoss.MathCounterHitMode == 1
+                        ? (int)counterValue
+                        : mathCounterBoss.MathCounterMaxValue - (int)counterValue;
+                    if (currentHp > 0) return;
+                }
+
+                NotifyBossDefeated(boss);
+            }, TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        private void ScheduleDefeatConfirmationBreakable(BreakableBoss boss)
+        {
+            if (boss.DefeatPending) return;
+            boss.DefeatPending = true;
+
+            AddTimer(0.3f, () => {
+                if (!boss.DefeatPending) return;
+                boss.DefeatPending = false;
+
+                if (boss.BreakableEntity is not { IsValid: true } entity)
+                {
+                    NotifyBossDefeated(boss);
+                    return;
+                }
+
+                try
+                {
+                    var breakable = new CBreakable(entity.Handle);
+                    if (breakable.IsValid && breakable.Health > 0) return;
+                }
+                catch
+                {
+                }
+
+                NotifyBossDefeated(boss);
+            }, TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        private static void UpdateMaxHealth(BossData boss, int currentHp)
+        {
+            if (boss.MaxHealth <= 0)
+            {
+                boss.MaxHealth = Math.Max(currentHp, 1);
+                return;
+            }
+
+            if (currentHp > boss.MaxHealth)
+            {
+                boss.MaxHealth = currentHp;
+            }
+        }
+
+        private void NotifyBossDefeated(BossData boss)
+        {
+            foreach (var player in Utilities.GetPlayers())
+            {
+                if (player == null || !player.IsValid) continue;
+                if (!IsBossHudEnabled(player)) continue;
+                HitEventDisplay.ShowBossDefeated(player, boss);
+            }
         }
 
         private HookResult Hitbox_Hook(CEntityIOOutput output, string name, CEntityInstance activator, CEntityInstance caller, CVariant value, float delay)
@@ -430,40 +581,17 @@ namespace EntBossHP
             return BreakableOut(output, name, activator, caller, value, delay);
         }
 
-
-        private void CheckInactiveBosses()
+        private void UpdateAndDisplayBoss(BossData boss, CCSPlayerController client)
         {
-            if (_activeBosses.Count == 0) return;
-
-            var currentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            List<string> bossesToRemove = [];
-
-            foreach (var boss in _activeBosses.Values)
+            if (boss.Enabled && IsBossHudEnabled(client))
             {
-                if (!boss.Enabled || (boss.LastHit > 0 && currentTime - boss.LastHit > 60.0))
-                {
-                    bossesToRemove.Add(boss.BossName);
-                }
-            }
-
-            foreach (var bossName in bossesToRemove)
-            {
-                _activeBosses.Remove(bossName);
+                HitEventDisplay.ShowHitEvent(client, boss, boss.Health);
             }
         }
 
-        private void UpdateAndDisplayBoss(BossData boss, CCSPlayerController client)
+        private bool IsBossHudEnabled(CCSPlayerController client)
         {
-            boss.LastHP = boss.Health;
-            boss.LastHit = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
-            if (boss.Enabled)
-            {
-                _activeBosses.TryAdd(boss.BossName, boss);
-                
-                if (IsBhudEnabled())
-                    HitEventDisplay.ShowHitEvent(client, boss, boss.Health);
-            }
+            return _playerPreferenceService.IsHudEnabled(client);
         }
 
 
@@ -510,16 +638,46 @@ namespace EntBossHP
             }
         }
 
-        private bool IsBhudEnabled() => CvarEnableBhud.Value;
-
         private void SaveChanges()
         {
-            var configPath = Path.Combine(PluginConfigDirectory, $"{Server.MapName}.jsonc");
-            var configDirectory = Path.GetDirectoryName(configPath);
-            if (configDirectory != null && !Directory.Exists(configDirectory)) Directory.CreateDirectory(configDirectory);
-            var json = JsonConvert.SerializeObject(BossConfigs, Formatting.Indented);
-            File.WriteAllText(configPath, json);
-            Logger.LogInformation($"Saved updated boss config to {configPath}");
+            string configPath;
+            string? configDirectory;
+            string json;
+
+            try
+            {
+                configPath = Path.Combine(PluginConfigDirectory, $"{Server.MapName}.jsonc");
+                configDirectory = Path.GetDirectoryName(configPath);
+                json = JsonSerializer.Serialize(BossConfigs, new JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Failed to snapshot boss config");
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                await SaveLock.WaitAsync();
+                try
+                {
+                    if (configDirectory != null && !Directory.Exists(configDirectory)) Directory.CreateDirectory(configDirectory);
+                    await File.WriteAllTextAsync(configPath, json);
+                    Logger.LogInformation($"Saved updated boss config to {configPath}");
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(ex, "Failed to save boss config");
+                }
+                finally
+                {
+                    SaveLock.Release();
+                }
+            });
         }
     }
 }

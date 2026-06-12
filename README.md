@@ -4,14 +4,13 @@ A Counter-Strike 2 plugin for displaying boss health information to players duri
 
 ## Overview
 
-EntBossHP tracks and displays the health of configured boss entities in CS2 maps through center screen messages. The plugin supports breakable entities, math counters, and HP bar systems.
+EntBossHP tracks and displays the health of configured boss entities in CS2 maps through center screen messages. The plugin supports breakable entities and math counters. It also features a segmented boss system for bosses with multiple health phases.
 
 ## Features
 
 - **Multiple Boss Types Support**:
-  - Breakable entities (`func_physbox`, `func_breakable`, `prop_dynamic`)
+  - Breakable entities (unc_physbox, unc_breakable, prop_dynamic)
   - Math counter entities
-  - HP bar systems with iterator and backup counters
 
 - **Real-time HP Display**:
   - Boss HP shown to the attacking player
@@ -21,6 +20,11 @@ EntBossHP tracks and displays the health of configured boss entities in CS2 maps
 - **Segmented Boss Support**:
   - Bosses with multiple health segments
   - Remaining segment display
+  - Uses health_segment_counter to track boss phases
+
+- **Player Preferences**:
+  - Players can toggle their own boss HP HUD via chat commands.
+  - Integration with PlayerSettingsApi to save player preferences across sessions.
 
 - **Auto-configuration**:
   - Automatically detects and adds new boss entities
@@ -30,8 +34,9 @@ EntBossHP tracks and displays the health of configured boss entities in CS2 maps
 ## Installation
 
 1. Install CounterStrikeSharp on your CS2 server.
-2. Place the plugin files in your CounterStrikeSharp plugins directory.
-3. Restart the server or load the plugin.
+2. (Optional but Recommended) Install PlayerSettingsApi for saving player preferences.
+3. Place the plugin files in your CounterStrikeSharp plugins directory.
+4. Restart the server or load the plugin.
 
 ## Configuration
 
@@ -39,17 +44,13 @@ EntBossHP tracks and displays the health of configured boss entities in CS2 maps
 
 The plugin creates configuration files for each map in JSON format:
 
-```text
+\\\	ext
 configs/plugins/EntBossHP/{mapname}.jsonc
-```
-
-### ConVars
-
-- `css_bosshp_enablebhud` - Enable boss HP center HUD output (default: true)
+\\\
 
 ### Config File Structure
 
-```json
+\\\json
 {
   "Breakable": [
     {
@@ -71,48 +72,33 @@ configs/plugins/EntBossHP/{mapname}.jsonc
       "health_segment_counter_mode": 1,
       "hp_offset": 0
     }
-  ],
-  "HPBar": [
-    {
-      "name": "HP Bar Boss",
-      "enabled": true,
-      "mathcounter": "main_counter",
-      "mathcounter_mode": 1,
-      "iterator": "iterator_name",
-      "iterator_mode": 1,
-      "backup": "backup_counter",
-      "hp_offset": 0
-    }
   ]
 }
-```
+\\\
+
+> **Note:** The old HPBar configuration block is **deprecated**. Please use MathCounter in combination with health_segment_counter for multi-phase/segmented bosses instead.
 
 ## Boss Types
 
 ### 1. Breakable Boss
 
-- Monitors breakable entities like `func_physbox`, `func_breakable`, and `prop_dynamic`
+- Monitors breakable entities like unc_physbox, unc_breakable, and prop_dynamic
 - Tracks entity health changes
 - Supports segment counters for multi-phase bosses
 
 ### 2. Math Counter Boss
 
-- Uses `math_counter` entities to track boss HP
+- Uses math_counter entities to track boss HP
 - Supports different counter modes:
   - Mode 1: Direct counter value
   - Mode 2: Inverted counter value (max - current)
 - Auto-detects counter min/max values
-
-### 3. HP Bar Boss
-
-- Advanced system using multiple math counters
-- Main counter for primary HP
-- Iterator counter for additional tracking
-- Backup counter for fallback values
+- Supports segment counters for multi-phase bosses
 
 ## Commands
 
-- `boss_list` - Display configured bosses and their settings (console only)
+- !bhud (or /bhud, css_bhud) - Toggles the Boss HP HUD on/off for the executing player. (Preferences are saved if PlayerSettingsApi is installed)
+- oss_list - Display configured bosses and their settings (console only)
 
 ## Display Features
 
@@ -130,10 +116,10 @@ The plugin automatically detects new boss entities during gameplay:
 
 ## Technical Details
 
-- **Version**: 2.1.0
+- **Version**: 2.1.1
 - **Author**: Oylsister, Credits to Kxrnl, DarkerZ [RUS] / modified by Tsukasa
 - **Target Framework**: .NET 10
-- **Dependencies**: CounterStrikeSharp.API 1.0.369, Newtonsoft.Json 13.0.3
+- **Dependencies**: CounterStrikeSharp.API 1.0.369, PlayerSettingsApi (Optional)
 - **Supported Entities**: math_counter, func_physbox_multiplayer, func_physbox, func_breakable, prop_dynamic
 
 ## Troubleshooting

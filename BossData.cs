@@ -1,4 +1,4 @@
-﻿using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core;
 
 namespace EntBossHP
 {
@@ -20,6 +20,7 @@ namespace EntBossHP
         public BossType Type { get; set; }
         public bool Enabled { get; set; }
         public int HpOffset { get; set; } = 0;
+        public bool DefeatPending { get; set; }
 
     }
 
@@ -47,16 +48,5 @@ namespace EntBossHP
         public int MathCounterStartValue { get; set; }
         public int MathCounterMaxValue { get; set; }
         public int MathCounterMinValue { get; set; }
-    }
-
-    public class HPBarBoss : MathCounterBoss
-    {
-        public CEntityInstance? IteratorEntity { get; set; }
-        public string IteratorName { get; set; } = string.Empty;
-        public int IteratorHitMode { get; set; } = -1;
-        public float IteratorValue { get; set; }
-        public CEntityInstance? BackUpEntity { get; set; }
-        public string BackupName { get; set; } = string.Empty;
-        public float BackupValue { get; set; }
     }
 }

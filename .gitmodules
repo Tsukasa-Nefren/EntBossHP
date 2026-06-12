@@ -1,0 +1,3 @@
+[submodule "vendor/PlayerSettingsCS2"]
+	path = vendor/PlayerSettingsCS2
+	url = https://github.com/NickFox007/PlayerSettingsCS2.git
