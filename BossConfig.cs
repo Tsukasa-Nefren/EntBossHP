@@ -11,8 +11,9 @@ namespace EntBossHP
         public List<MathCounterConfig> MathCounterList { get; set; } = [];
 
         [JsonPropertyName("HPBar")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         [Obsolete("HPBar is deprecated. Use MathCounter with health_segment_counter instead.")]
-        public List<HPBarConfig> HPBarList { get; set; } = [];
+        public List<HPBarConfig>? HPBarList { get; set; }
     }
 
     public class BreakableConfig

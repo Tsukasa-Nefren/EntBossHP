@@ -6,7 +6,7 @@ on:
       - main
 
 env:
-  PLUGIN_VERSION: "2.1.5" # EDIT THIS LINE TO CREATE A NEW RELEASE
+  PLUGIN_VERSION: "2.1.13" # EDIT THIS LINE TO CREATE A NEW RELEASE
 
 jobs:
   build_and_release:
@@ -76,6 +76,8 @@ jobs:
             --title "EntBossHP v${{ env.PLUGIN_VERSION }}" \
             --notes "Changelog:
             
-            - Fix HUD name stealing bug where disabled configs could incorrectly hijack display names due to reversed string matching.
-            - Fix segment counter duplication by explicitly skipping existing health segment counters during auto-discovery.
-            - Fix prefix collision bug (e.g. lv1_boss_hp_left matching lv1_boss_hp) by switching to exact sanitized name equality instead of StartsWith."
+            - Add runtime auto-segment learner (fixes boss rename bugs)
+            - Remove unsafe pointers to survive CS2 updates
+            - Fix segment counters registering as main bosses
+            - Fix duplicate boss defeat events
+            - Optimize async config saves"

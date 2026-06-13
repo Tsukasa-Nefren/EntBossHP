@@ -21,6 +21,7 @@ namespace EntBossHP
         public bool Enabled { get; set; }
         public int HpOffset { get; set; } = 0;
         public bool DefeatPending { get; set; }
+        public bool Defeated { get; set; }
 
     }
 
@@ -32,6 +33,7 @@ namespace EntBossHP
         public int HealthSegments { get; set; }
         public int TotalHealthSegments { get; set; }
         public int HealthSegmentCounterMode { get; set; } = 1;
+        public int HealthSegmentCounterHpOffset { get; set; }
     }
 
     public class BreakableBoss : SegmentedBossData
