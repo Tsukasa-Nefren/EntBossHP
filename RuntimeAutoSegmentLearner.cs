@@ -22,6 +22,7 @@ namespace EntBossHP
     {
         private const double DefaultWindowSeconds = 1.0;
         private const double FloatTolerance = 0.01;
+        private const int MinimumLearnConfidence = 3;
 
         private readonly double _windowSeconds;
         private readonly Dictionary<string, MainState> _states = new(StringComparer.Ordinal);
@@ -68,10 +69,10 @@ namespace EntBossHP
             Func<string, string, bool> namesMatch)
         {
             if (string.IsNullOrWhiteSpace(counterName)) return new(false);
-            if (IsDangerousCandidateName(counterName)) return new(false);
 
             var mode = TryResolveMode(currentValue, previousValue, maxValue);
             if (mode is null) return new(false);
+            var confidence = GetCandidateConfidence(counterName, mode.Value, previousValue, maxValue);
 
             var suppress = false;
             foreach (var state in _states.Values)
@@ -80,7 +81,7 @@ namespace EntBossHP
                 if (now > state.WindowEndsAt) continue;
                 if (namesMatch(counterName, state.MainCounter)) continue;
 
-                state.Candidates[(counterName, mode.Value)] = new SegmentCandidate(counterName, mode.Value);
+                state.Candidates[(counterName, mode.Value)] = new SegmentCandidate(counterName, mode.Value, confidence);
                 suppress = true;
             }
 
@@ -102,17 +103,26 @@ namespace EntBossHP
             state.Candidates.Clear();
             state.WindowEndsAt = 0;
 
-            if (candidates.Count == 0)
+            var confidentCandidates = candidates
+                .Where(candidate => candidate.Confidence >= MinimumLearnConfidence)
+                .ToList();
+
+            if (confidentCandidates.Count == 0)
             {
-                return new(RuntimeAutoSegmentDecisionStatus.None, mainCounter, null, 0, "no segment candidates");
+                return new(RuntimeAutoSegmentDecisionStatus.None, mainCounter, null, 0, "no confident segment candidates");
             }
 
-            if (candidates.Count > 1)
+            var bestConfidence = confidentCandidates.Max(candidate => candidate.Confidence);
+            var bestCandidates = confidentCandidates
+                .Where(candidate => candidate.Confidence == bestConfidence)
+                .ToList();
+
+            if (bestCandidates.Count > 1)
             {
                 return new(RuntimeAutoSegmentDecisionStatus.Ambiguous, mainCounter, null, 0, "multiple segment candidates");
             }
 
-            var learned = candidates[0];
+            var learned = bestCandidates[0];
             _states.Remove(mainCounter);
             return new(
                 RuntimeAutoSegmentDecisionStatus.Learned,
@@ -142,14 +152,49 @@ namespace EntBossHP
             return looksLikeSubtract ? 1 : 2;
         }
 
-        private static bool IsDangerousCandidateName(string counterName)
+        private static int GetCandidateConfidence(string counterName, int mode, float? previousValue, float? maxValue)
         {
             var name = counterName.ToLowerInvariant();
+            var confidence = 0;
+
+            if (maxValue is > 0 and <= 64) confidence++;
+            if (previousValue.HasValue) confidence++;
+            if (mode == 2) confidence++;
+
+            if (LooksLikeStrongSegmentCounterName(name)) confidence += 3;
+            else if (name.Contains("counter", StringComparison.Ordinal)) confidence++;
+
+            if (LooksLikeVisualHpBarCounterName(name)) confidence -= 2;
+            if (LooksLikeAuxiliaryCounterName(name)) confidence -= 2;
+
+            return confidence;
+        }
+
+        private static bool LooksLikeStrongSegmentCounterName(string name)
+        {
+            return name.Contains("segment", StringComparison.Ordinal)
+                || name.Contains("phase", StringComparison.Ordinal)
+                || name.Contains("iteration", StringComparison.Ordinal)
+                || name.Contains("healthcount", StringComparison.Ordinal)
+                || name.Contains("hpcount", StringComparison.Ordinal)
+                || name.Contains("mathcounter", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikeVisualHpBarCounterName(string name)
+        {
+            return name.EndsWith("hp", StringComparison.Ordinal)
+                || name.Contains("hpbar", StringComparison.Ordinal)
+                || name.Contains("hp_bar", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikeAuxiliaryCounterName(string name)
+        {
             return name.Contains("attack", StringComparison.Ordinal)
+                || name.Contains("button", StringComparison.Ordinal)
                 || name.Contains("crystal", StringComparison.Ordinal)
+                || name.Contains("door", StringComparison.Ordinal)
                 || name.Contains("item", StringComparison.Ordinal)
                 || name.Contains("laser", StringComparison.Ordinal)
-                || name.Contains("overlay", StringComparison.Ordinal)
                 || name.Contains("skill", StringComparison.Ordinal)
                 || name.Contains("summon", StringComparison.Ordinal)
                 || name.Contains("text", StringComparison.Ordinal)
@@ -167,6 +212,6 @@ namespace EntBossHP
             public Dictionary<(string SegmentCounter, int Mode), SegmentCandidate> Candidates { get; } = new();
         }
 
-        private sealed record SegmentCandidate(string SegmentCounter, int Mode);
+        private sealed record SegmentCandidate(string SegmentCounter, int Mode, int Confidence);
     }
 }

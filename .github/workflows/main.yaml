@@ -6,7 +6,7 @@ on:
       - main
 
 env:
-  PLUGIN_VERSION: "2.1.13" # EDIT THIS LINE TO CREATE A NEW RELEASE
+  PLUGIN_VERSION: "2.1.15" # EDIT THIS LINE TO CREATE A NEW RELEASE
 
 jobs:
   build_and_release:
@@ -76,8 +76,8 @@ jobs:
             --title "EntBossHP v${{ env.PLUGIN_VERSION }}" \
             --notes "Changelog:
             
-            - Add runtime auto-segment learner (fixes boss rename bugs)
-            - Remove unsafe pointers to survive CS2 updates
-            - Fix segment counters registering as main bosses
-            - Fix duplicate boss defeat events
-            - Optimize async config saves"
+            - Fix generated breakable names such as pillar_break_1 / pillar_break_2 being treated as separate bosses
+            - Add safer runtime auto-enable for newly detected breakable bosses after short damage observation
+            - Prevent obvious item, laser, button, trigger, and dummy-health breakables from being auto-enabled
+            - Limit automatic breakable enablement per map to reduce config pollution
+            - Improve runtime auto-segment learning and display-name matching"

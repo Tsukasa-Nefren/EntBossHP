@@ -25,12 +25,19 @@ namespace EntBossHP
         private const float MathCounterDefeatConfirmationDelay = 1.35f;
         private const float BreakableDefeatConfirmationDelay = 0.3f;
         private const float AutoSegmentLearningWindow = 1.0f;
+        private const float BreakableAutoEnableObservationWindow = 1.0f;
+        private const int BreakableAutoEnableMinHealth = 100;
+        private const int BreakableAutoEnableMaxHealth = 1_000_000;
+        private const int BreakableAutoEnableMaxPerMap = 8;
 
         [GeneratedRegex(@"_\d{3,}$")]
         private static partial Regex BossNameSuffixRegex();
 
+        [GeneratedRegex(@"^(?<base>.+_)\d+$")]
+        private static partial Regex GeneratedNumericSuffixRegex();
+
         public override string ModuleName => "EntBossHP";
-        public override string ModuleVersion => "2.1.13";
+        public override string ModuleVersion => "2.1.15";
         public override string ModuleAuthor => "Oylsister, Credits to Kxrnl, DarkerZ [RUS] / modified by Tsukasa";
         
         public string PluginConfigDirectory => Path.Combine(ModuleDirectory, "..", "..", "configs", "plugins", ModuleName);
@@ -39,7 +46,9 @@ namespace EntBossHP
         private readonly List<BreakableBoss> _breakableBosses = [];
         private readonly List<MathCounterBoss> _mathCounterBosses = [];
         private readonly Dictionary<string, float> _mathCounterValuesByName = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, PendingBreakableAutoEnable> _pendingBreakableAutoEnables = new(StringComparer.Ordinal);
         private readonly RuntimeAutoSegmentLearner _autoSegmentLearner = new(AutoSegmentLearningWindow);
+        private int _autoEnabledBreakablesThisMap;
 
         private static readonly System.Threading.SemaphoreSlim SaveLock = new(1, 1);
         private static long SaveGeneration;
@@ -158,7 +167,9 @@ namespace EntBossHP
             _breakableBosses.Clear();
             _mathCounterBosses.Clear();
             _mathCounterValuesByName.Clear();
+            _pendingBreakableAutoEnables.Clear();
             _autoSegmentLearner.Clear();
+            _autoEnabledBreakablesThisMap = 0;
             _gameRulesProxy = null;
             configLoaded = false;
         }
@@ -209,6 +220,8 @@ namespace EntBossHP
         private void MapStart(string mapname)
         {
             _gameRulesProxy = null;
+            _pendingBreakableAutoEnables.Clear();
+            _autoEnabledBreakablesThisMap = 0;
             LoadConfigBasedMap(mapname);
             if (ShouldRescanExistingMathCounters(false, mapname))
             {
@@ -367,6 +380,7 @@ namespace EntBossHP
 
         private void ResetBossHP()
         {
+            DiscardPendingBreakableAutoEnables();
             _mathCounterValuesByName.Clear();
 
             foreach (var boss in _breakableBosses)
@@ -506,7 +520,14 @@ namespace EntBossHP
                         var sanitizedName = SanitizeBossName(entityname);
                         if (!BossConfigs.MathCounterList.Any(b => b.MathCounter == sanitizedName))
                         {
-                            var newBossConfig = new MathCounterConfig { Name = sanitizedName, MathCounter = sanitizedName, MathCounterMode = 1, Enabled = (counterValue > 10), HpOffset = 0 };
+                            var newBossConfig = new MathCounterConfig
+                            {
+                                Name = sanitizedName,
+                                MathCounter = sanitizedName,
+                                MathCounterMode = 1,
+                                Enabled = ShouldAutoEnableNewMathCounter(entityname, counterValue, counterMaxValue),
+                                HpOffset = 0
+                            };
                             BossConfigs.MathCounterList.Add(newBossConfig);
                             if (newBossConfig.Enabled)
                             {
@@ -561,30 +582,21 @@ namespace EntBossHP
 
                 if (configLoaded)
                 {
+                     ObservePendingBreakableAutoEnable(entityname, hp, engineMaxHealth);
                      var isSegmentCounter =
                          BossConfigs.MathCounterList.Any(b => !string.IsNullOrWhiteSpace(b.HealthSegmentCounter) && MatchesEntityName(entityname, b.HealthSegmentCounter)) ||
                          BossConfigs.BreakableList.Any(b => !string.IsNullOrWhiteSpace(b.HealthSegmentCounter) && MatchesEntityName(entityname, b.HealthSegmentCounter));
-                     if (!isSegmentCounter && !BossConfigs.BreakableList.Any(b => MatchesEntityName(entityname, b.Breakable)))
+                     if (!isSegmentCounter && !BossConfigs.BreakableList.Any(b => MatchesBreakableEntityName(entityname, b.Breakable)))
                      {
                         var sanitizedName = SanitizeBossName(entityname);
                         if (!BossConfigs.BreakableList.Any(b => b.Breakable == sanitizedName))
                         {
-                            var newBossConfig = new BreakableConfig { Name = sanitizedName, Breakable = sanitizedName, Enabled = false, HpOffset = 0 };
-                            BossConfigs.BreakableList.Add(newBossConfig);
-                            SaveChanges();
-                            var newLiveBoss = new BreakableBoss { BossName = newBossConfig.Name, Enabled = newBossConfig.Enabled, BreakableEntityName = newBossConfig.Breakable, BreakableEntity = caller, HpOffset = newBossConfig.HpOffset };
-                            newLiveBoss.Health = hp;
-                            UpdateBreakableMaxHealth(newLiveBoss, hp, engineMaxHealth);
-                            _breakableBosses.Add(newLiveBoss);
-                            if (newLiveBoss.Enabled)
-                            {
-                                UpdateAndDisplayBoss(newLiveBoss, client);
-                            }
+                            TrackPendingBreakableAutoEnable(sanitizedName, caller, hp, engineMaxHealth);
                         }
                      }
                 }
 
-                foreach (var boss in _breakableBosses.Where(b => MatchesEntityName(entityname, b.BreakableEntityName)))
+                foreach (var boss in _breakableBosses.Where(b => MatchesBreakableEntityName(entityname, b.BreakableEntityName)))
                 {
                     if (boss.Defeated) continue;
 
@@ -837,6 +849,82 @@ namespace EntBossHP
             }
         }
 
+        private void TrackPendingBreakableAutoEnable(string sanitizedName, CEntityInstance caller, int hp, int engineMaxHealth)
+        {
+            if (_pendingBreakableAutoEnables.ContainsKey(sanitizedName)) return;
+
+            var newBossConfig = new BreakableConfig
+            {
+                Name = sanitizedName,
+                Breakable = sanitizedName,
+                Enabled = false,
+                HpOffset = 0
+            };
+            BossConfigs.BreakableList.Add(newBossConfig);
+
+            var newLiveBoss = new BreakableBoss
+            {
+                BossName = newBossConfig.Name,
+                Enabled = newBossConfig.Enabled,
+                BreakableEntityName = newBossConfig.Breakable,
+                BreakableEntity = caller,
+                HpOffset = newBossConfig.HpOffset
+            };
+            newLiveBoss.Health = hp;
+            UpdateBreakableMaxHealth(newLiveBoss, hp, engineMaxHealth);
+            _breakableBosses.Add(newLiveBoss);
+
+            var pending = new PendingBreakableAutoEnable(newBossConfig, newLiveBoss, hp, engineMaxHealth);
+            _pendingBreakableAutoEnables[sanitizedName] = pending;
+
+            AddTimer(BreakableAutoEnableObservationWindow, () => FinalizePendingBreakableAutoEnable(sanitizedName), TimerFlags.STOP_ON_MAPCHANGE);
+        }
+
+        private void ObservePendingBreakableAutoEnable(string entityName, int hp, int engineMaxHealth)
+        {
+            foreach (var pending in _pendingBreakableAutoEnables.Values)
+            {
+                if (!MatchesBreakableEntityName(entityName, pending.Config.Breakable)) continue;
+                pending.Observe(hp, engineMaxHealth);
+                return;
+            }
+        }
+
+        private void FinalizePendingBreakableAutoEnable(string breakableName)
+        {
+            if (!_pendingBreakableAutoEnables.Remove(breakableName, out var pending)) return;
+            if (!BossConfigs.BreakableList.Contains(pending.Config)) return;
+
+            var shouldEnable = ShouldAutoEnableNewBreakable(
+                pending.Config.Breakable,
+                pending.FirstHealth,
+                pending.LastHealth,
+                pending.HighestObservedHealth,
+                pending.HighestEngineMaxHealth,
+                pending.ObservedHealthDecrease,
+                _autoEnabledBreakablesThisMap);
+
+            pending.Config.Enabled = shouldEnable;
+            pending.LiveBoss.Enabled = shouldEnable;
+            if (shouldEnable)
+            {
+                _autoEnabledBreakablesThisMap++;
+            }
+
+            SaveChanges();
+        }
+
+        private void DiscardPendingBreakableAutoEnables()
+        {
+            foreach (var pending in _pendingBreakableAutoEnables.Values)
+            {
+                BossConfigs.BreakableList.Remove(pending.Config);
+                _breakableBosses.Remove(pending.LiveBoss);
+            }
+
+            _pendingBreakableAutoEnables.Clear();
+        }
+
         private void ScheduleDefeatConfirmationBreakable(BreakableBoss boss)
         {
             if (boss.DefeatPending) return;
@@ -976,6 +1064,129 @@ namespace EntBossHP
             return SanitizeBossName(entityName).Equals(configuredName, StringComparison.Ordinal);
         }
 
+        private bool MatchesBreakableEntityName(string entityName, string configuredName)
+        {
+            return MatchesEntityName(entityName, configuredName)
+                || NamesMatchGeneratedNumericSuffixFamily(entityName, configuredName);
+        }
+
+        internal static bool NamesMatchGeneratedNumericSuffixFamily(string firstName, string secondName)
+        {
+            var firstBase = GetGeneratedNumericSuffixBase(firstName);
+            if (firstBase is null) return false;
+
+            var secondBase = GetGeneratedNumericSuffixBase(secondName);
+            return secondBase is not null && firstBase.Equals(secondBase, StringComparison.Ordinal);
+        }
+
+        private static string? GetGeneratedNumericSuffixBase(string entityName)
+        {
+            if (string.IsNullOrWhiteSpace(entityName)) return null;
+
+            var match = GeneratedNumericSuffixRegex().Match(entityName);
+            if (!match.Success) return null;
+
+            var baseName = match.Groups["base"].Value;
+            return LooksLikeGeneratedBreakableTemplateBase(baseName) ? baseName : null;
+        }
+
+        private static bool LooksLikeGeneratedBreakableTemplateBase(string baseName)
+        {
+            var normalized = baseName.ToLowerInvariant();
+            return normalized.Contains("break_", StringComparison.Ordinal)
+                || normalized.Contains("breakable_", StringComparison.Ordinal)
+                || normalized.Contains("block_", StringComparison.Ordinal);
+        }
+
+        internal static bool ShouldAutoEnableNewMathCounter(string entityName, float counterValue, float? maxValue)
+        {
+            if (string.IsNullOrWhiteSpace(entityName)) return false;
+            if (counterValue <= 10) return false;
+            if (maxValue is > 0 and <= 64) return false;
+
+            var name = entityName.ToLowerInvariant();
+            if (LooksLikeAuxiliaryAutoCreateCounter(name)) return false;
+
+            return LooksLikeBossHealthAutoCreateCounter(name);
+        }
+
+        internal static bool ShouldAutoEnableNewBreakable(
+            string entityName,
+            int firstHealth,
+            int lastHealth,
+            int highestObservedHealth,
+            int highestEngineMaxHealth,
+            bool observedHealthDecrease,
+            int autoEnabledThisMap)
+        {
+            if (string.IsNullOrWhiteSpace(entityName)) return false;
+            if (autoEnabledThisMap >= BreakableAutoEnableMaxPerMap) return false;
+
+            var name = entityName.ToLowerInvariant();
+            if (LooksLikeAuxiliaryBreakableAutoEnableName(name)) return false;
+
+            var effectiveMaxHealth = Math.Max(
+                Math.Max(firstHealth, lastHealth),
+                Math.Max(highestObservedHealth, highestEngineMaxHealth));
+            if (effectiveMaxHealth < BreakableAutoEnableMinHealth) return false;
+            if (effectiveMaxHealth >= BreakableAutoEnableMaxHealth) return false;
+
+            var hasDamageEvidence = observedHealthDecrease
+                || (highestEngineMaxHealth > 0 && Math.Min(firstHealth, lastHealth) < highestEngineMaxHealth);
+
+            return hasDamageEvidence;
+        }
+
+        private static bool LooksLikeBossHealthAutoCreateCounter(string name)
+        {
+            return name.Contains("boss", StringComparison.Ordinal)
+                || name.Contains("hp", StringComparison.Ordinal)
+                || name.Contains("health", StringComparison.Ordinal)
+                || name.Contains("vida", StringComparison.Ordinal)
+                || name.Contains("life", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikeAuxiliaryAutoCreateCounter(string name)
+        {
+            return (name.Contains("attack", StringComparison.Ordinal) && !name.Contains("attackhp", StringComparison.Ordinal))
+                || name.Contains("button", StringComparison.Ordinal)
+                || name.Contains("crystal", StringComparison.Ordinal)
+                || name.Contains("door", StringComparison.Ordinal)
+                || name.Contains("item", StringComparison.Ordinal)
+                || name.Contains("laser", StringComparison.Ordinal)
+                || name.Contains("music", StringComparison.Ordinal)
+                || name.Contains("skill", StringComparison.Ordinal)
+                || name.Contains("summon", StringComparison.Ordinal)
+                || name.Contains("text", StringComparison.Ordinal)
+                || name.Contains("timer", StringComparison.Ordinal)
+                || name.Contains("track", StringComparison.Ordinal)
+                || name.Contains("trigger", StringComparison.Ordinal)
+                || name.Contains("turn", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikeAuxiliaryBreakableAutoEnableName(string name)
+        {
+            return name.Contains("afk", StringComparison.Ordinal)
+                || name.Contains("button", StringComparison.Ordinal)
+                || name.Contains("case", StringComparison.Ordinal)
+                || name.Contains("hurt", StringComparison.Ordinal)
+                || name.Contains("item", StringComparison.Ordinal)
+                || name.Contains("laser", StringComparison.Ordinal)
+                || name.Contains("maker", StringComparison.Ordinal)
+                || name.Contains("music", StringComparison.Ordinal)
+                || name.Contains("pain_target", StringComparison.Ordinal)
+                || name.Contains("particle", StringComparison.Ordinal)
+                || name.Contains("relay", StringComparison.Ordinal)
+                || name.Contains("skill", StringComparison.Ordinal)
+                || name.Contains("sound", StringComparison.Ordinal)
+                || name.Contains("tele", StringComparison.Ordinal)
+                || name.Contains("timer", StringComparison.Ordinal)
+                || name.Contains("trigger", StringComparison.Ordinal)
+                || (name.Contains("box", StringComparison.Ordinal)
+                    && !name.Contains("boss", StringComparison.Ordinal)
+                    && !name.Contains("hitbox", StringComparison.Ordinal));
+        }
+
         private bool NamesMatchEitherDirection(string firstName, string secondName)
         {
             return MatchesEntityName(firstName, secondName) || MatchesEntityName(secondName, firstName);
@@ -1026,6 +1237,46 @@ namespace EntBossHP
                 : counterValue;
 
             boss.HealthSegments = Math.Max(0, rawHealthSegments + boss.HealthSegmentCounterHpOffset);
+        }
+
+        private sealed class PendingBreakableAutoEnable
+        {
+            public PendingBreakableAutoEnable(BreakableConfig config, BreakableBoss liveBoss, int firstHealth, int engineMaxHealth)
+            {
+                Config = config;
+                LiveBoss = liveBoss;
+                FirstHealth = firstHealth;
+                LastHealth = firstHealth;
+                HighestObservedHealth = firstHealth;
+                HighestEngineMaxHealth = Math.Max(0, engineMaxHealth);
+            }
+
+            public BreakableConfig Config { get; }
+            public BreakableBoss LiveBoss { get; }
+            public int FirstHealth { get; }
+            public int LastHealth { get; private set; }
+            public int HighestObservedHealth { get; private set; }
+            public int HighestEngineMaxHealth { get; private set; }
+            public bool ObservedHealthDecrease { get; private set; }
+
+            public void Observe(int health, int engineMaxHealth)
+            {
+                if (health < LastHealth)
+                {
+                    ObservedHealthDecrease = true;
+                }
+
+                LastHealth = health;
+                if (health > HighestObservedHealth)
+                {
+                    HighestObservedHealth = health;
+                }
+
+                if (engineMaxHealth > HighestEngineMaxHealth)
+                {
+                    HighestEngineMaxHealth = engineMaxHealth;
+                }
+            }
         }
 
         private void SaveChanges()

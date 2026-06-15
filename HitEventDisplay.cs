@@ -32,7 +32,7 @@ namespace EntBossHP
             _plugin = plugin;
         }
 
-        private string SanitizeBossName(string entityName)
+        private static string SanitizeBossName(string entityName)
         {
             if (string.IsNullOrEmpty(entityName)) return string.Empty;
             return BossNameSuffixRegex().Replace(entityName, "_");
@@ -40,29 +40,66 @@ namespace EntBossHP
 
         private string GetBossDisplayName(string entityName)
         {
-            if (_plugin.BossConfigs == null) return SanitizeBossName(entityName);
+            return ResolveDisplayName(_plugin.BossConfigs, entityName);
+        }
 
+        internal static string ResolveDisplayName(BossConfig? config, string entityName)
+        {
             var sanitizedName = SanitizeBossName(entityName);
+            if (config == null) return sanitizedName;
 
-            if (_plugin.BossConfigs.BreakableList != null)
+            var best = FindBestDisplayEntry(
+                sanitizedName,
+                GetDisplayEntries(config.BreakableList, config.MathCounterList));
+
+            return best.DisplayName ?? sanitizedName;
+        }
+
+        private static IEnumerable<(string ConfiguredName, string? DisplayName)> GetDisplayEntries(
+            IEnumerable<BreakableConfig>? breakables,
+            IEnumerable<MathCounterConfig>? mathCounters)
+        {
+            if (breakables != null)
             {
-                foreach (var breakable in _plugin.BossConfigs.BreakableList)
+                foreach (var breakable in breakables)
                 {
-                    if (breakable != null && MatchesDisplayName(breakable.Breakable, sanitizedName))
-                        return breakable.Name ?? sanitizedName;
+                    if (breakable != null) yield return (breakable.Breakable, breakable.Name);
                 }
             }
 
-            if (_plugin.BossConfigs.MathCounterList != null)
+            if (mathCounters != null)
             {
-                foreach (var mathCounter in _plugin.BossConfigs.MathCounterList)
+                foreach (var mathCounter in mathCounters)
                 {
-                    if (mathCounter != null && MatchesDisplayName(mathCounter.MathCounter, sanitizedName))
-                        return mathCounter.Name ?? sanitizedName;
+                    if (mathCounter != null) yield return (mathCounter.MathCounter, mathCounter.Name);
                 }
             }
+        }
 
-            return sanitizedName;
+        private static (string ConfiguredName, string? DisplayName) FindBestDisplayEntry(
+            string sanitizedName,
+            IEnumerable<(string ConfiguredName, string? DisplayName)> entries)
+        {
+            (string ConfiguredName, string? DisplayName) bestPrefix = default;
+            var bestPrefixLength = -1;
+
+            foreach (var entry in entries)
+            {
+                if (string.IsNullOrEmpty(entry.ConfiguredName) || string.IsNullOrEmpty(sanitizedName)) continue;
+
+                if (sanitizedName.Equals(entry.ConfiguredName, StringComparison.Ordinal))
+                {
+                    return entry;
+                }
+
+                if (!MatchesDisplayName(entry.ConfiguredName, sanitizedName)) continue;
+                if (entry.ConfiguredName.Length <= bestPrefixLength) continue;
+
+                bestPrefix = entry;
+                bestPrefixLength = entry.ConfiguredName.Length;
+            }
+
+            return bestPrefix;
         }
 
         public void ShowHitEvent(CCSPlayerController controller, BossData boss, int health)

@@ -110,7 +110,37 @@ Run("runtime auto segment learner skips ambiguous segment candidates", () =>
     AssertString(null, decision.SegmentCounter, "segment");
 });
 
-Run("runtime auto segment learner ignores dangerous candidate names", () =>
+Run("runtime auto segment learner learns overlay-named segment from behavior", () =>
+{
+    var learner = new RuntimeAutoSegmentLearner();
+    learner.TrackNewMain("Boss_Health", 0.0);
+    var mark = learner.MarkMainHitMin("Boss_Health", 1.0);
+
+    var observation = learner.ObserveCounter("Boss_Overlay_Counter", 8, 7, 7, 1.2, NamesMatch);
+    var decision = learner.Finalize("Boss_Health", mark.AttemptId, 1.5);
+
+    AssertBool(true, observation.SuppressAutoCreate, "suppress segment auto create");
+    AssertEqual((int)RuntimeAutoSegmentDecisionStatus.Learned, (int)decision.Status, "status");
+    AssertString("Boss_Overlay_Counter", decision.SegmentCounter, "segment");
+    AssertEqual(2, decision.Mode, "mode");
+});
+
+Run("runtime auto segment learner prefers phase counter over visual hp bar", () =>
+{
+    var learner = new RuntimeAutoSegmentLearner();
+    learner.TrackNewMain("Demonwal_attackhp", 0.0);
+    var mark = learner.MarkMainHitMin("Demonwal_attackhp", 1.0);
+
+    learner.ObserveCounter("Demonwal_shigehp", 9, 10, 10, 1.1, NamesMatch);
+    learner.ObserveCounter("Demonwal_shigemathcounter", 1, 0, 11, 1.2, NamesMatch);
+    var decision = learner.Finalize("Demonwal_attackhp", mark.AttemptId, 1.5);
+
+    AssertEqual((int)RuntimeAutoSegmentDecisionStatus.Learned, (int)decision.Status, "status");
+    AssertString("Demonwal_shigemathcounter", decision.SegmentCounter, "segment");
+    AssertEqual(2, decision.Mode, "mode");
+});
+
+Run("runtime auto segment learner suppresses but does not learn low-confidence auxiliary candidates", () =>
 {
     var learner = new RuntimeAutoSegmentLearner();
     learner.TrackNewMain("boss_hp", 0.0);
@@ -119,8 +149,54 @@ Run("runtime auto segment learner ignores dangerous candidate names", () =>
     var observation = learner.ObserveCounter("boss_attack_counter", 1, 0, 5, 1.2, NamesMatch);
     var decision = learner.Finalize("boss_hp", mark.AttemptId, 1.5);
 
-    AssertBool(false, observation.SuppressAutoCreate, "suppress segment auto create");
+    AssertBool(true, observation.SuppressAutoCreate, "suppress segment auto create");
     AssertEqual((int)RuntimeAutoSegmentDecisionStatus.None, (int)decision.Status, "status");
+});
+
+Run("new math counter auto enable is limited to likely boss hp counters", () =>
+{
+    AssertBool(true, global::EntBossHP.EntBossHP.ShouldAutoEnableNewMathCounter("nut_boss_hp", 300, 60000), "nut boss hp");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewMathCounter("Scathing_Counter", 800, 800), "scathing mechanic");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewMathCounter("laser_Exdeath_Hp", 55, 999999), "laser hp");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewMathCounter("Item_SGE_math", 4, 4), "item counter");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewMathCounter("Boss_S4_Hp_Counter", 11, 30), "small segment counter");
+});
+
+Run("generated numeric breakable suffixes share one configured family", () =>
+{
+    AssertBool(true, global::EntBossHP.EntBossHP.NamesMatchGeneratedNumericSuffixFamily("pillar_break_1", "pillar_break_2"), "pillar family");
+    AssertBool(true, global::EntBossHP.EntBossHP.NamesMatchGeneratedNumericSuffixFamily("boss_block_14", "boss_block_2"), "boss block family");
+    AssertBool(false, global::EntBossHP.EntBossHP.NamesMatchGeneratedNumericSuffixFamily("boss_1", "boss_2"), "generic numbered bosses");
+    AssertBool(false, global::EntBossHP.EntBossHP.NamesMatchGeneratedNumericSuffixFamily("lv1_boss_hp", "lv3_boss_hp"), "stage hp");
+    AssertBool(false, global::EntBossHP.EntBossHP.NamesMatchGeneratedNumericSuffixFamily("Boss_Health_Suzaku", "Boss_Health_Chaos"), "named bosses");
+});
+
+Run("new breakable auto enable requires bounded health and damage evidence", () =>
+{
+    AssertBool(true, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("pillar_break_1", 3500, 3300, 3500, 0, true, 0), "pillar damage");
+    AssertBool(true, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("door12", 450, 450, 450, 500, false, 0), "engine max damage evidence");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("glass", 80, 60, 80, 0, true, 0), "tiny breakable");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("boss_hitbox", 9999999, 9999900, 9999999, 9999999, true, 0), "dummy health");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("Item_Emiya_Box", 500, 450, 500, 0, true, 0), "item box");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("laser_wall", 500, 450, 500, 0, true, 0), "laser wall");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("box 2", 200, 150, 200, 0, true, 0), "generic box");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("door12", 450, 450, 450, 0, false, 0), "no damage evidence");
+    AssertBool(false, global::EntBossHP.EntBossHP.ShouldAutoEnableNewBreakable("pillar_break_1", 3500, 3300, 3500, 0, true, 8), "map cap reached");
+});
+
+Run("display name resolution uses exact match before longest prefix", () =>
+{
+    var config = new BossConfig
+    {
+        MathCounterList =
+        [
+            new() { Name = "Generic", MathCounter = "Boss_Health" },
+            new() { Name = "Suzaku", MathCounter = "Boss_Health_Suzaku" }
+        ]
+    };
+
+    AssertString("Suzaku", HitEventDisplay.ResolveDisplayName(config, "Boss_Health_Suzaku"), "exact specific");
+    AssertString("Generic", HitEventDisplay.ResolveDisplayName(config, "Boss_Health_001"), "template prefix");
 });
 
 Run("segment counter helper creates disabled editable config entry", () =>
